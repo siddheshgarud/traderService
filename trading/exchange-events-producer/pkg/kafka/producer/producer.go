@@ -1,0 +1,232 @@
+package producer
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"exchange-events-producer/pkg/config"
+	
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/avast/retry-go"
+	"github.com/segmentio/kafka-go"
+)
+
+/* =========================================================
+   =============== External Kafka Producer Lib =============
+   ========================================================= */
+
+type Health struct {
+    ConnectionState bool     `json:"connection_state"`
+    Brokers         []string `json:"brokers"`
+    Topic           string   `json:"topic"`
+    LastError       string   `json:"last_error,omitempty"`
+}
+
+type ProducerMessage struct {
+    Topic     string
+    Key       []byte
+    Value     []byte
+    Timestamp time.Time
+    Headers   []kafka.Header
+}
+
+type Config struct {
+    Brokers        []string
+    Topic          string
+    BatchSize      int
+    Timeout        time.Duration
+
+    ErrorHandler   func(ctx context.Context, err error, message *ProducerMessage)
+    SuccessHandler func(ctx context.Context, message ProducerMessage)
+}
+
+func NewConfig() *Config {
+    return &Config{
+        BatchSize: 1,
+        Timeout:   10 * time.Second,
+    }
+}
+
+type KafkaProducer struct {
+    config   *Config
+    health   Health
+    mu       sync.RWMutex
+    writer   *kafka.Writer
+    running  bool
+    stopChan chan struct{}
+}
+
+func New(config *Config) (*KafkaProducer, error) {
+    if config == nil {
+        return nil, errors.New("invalid config")
+    }
+    if len(config.Brokers) == 0 || config.Topic == "" {
+        return nil, errors.New("missing brokers or topic")
+    }
+
+    w := &kafka.Writer{
+        Addr:         kafka.TCP(config.Brokers...),
+        Topic:        config.Topic,
+        Balancer:     &kafka.LeastBytes{},
+        BatchSize:    config.BatchSize,
+        RequiredAcks: kafka.RequireAll,
+        Async:        false,
+    }
+
+    return &KafkaProducer{
+        config: config,
+        health: Health{
+            ConnectionState: true,
+            Brokers:         config.Brokers,
+            Topic:           config.Topic,
+        },
+        writer:   w,
+        stopChan: make(chan struct{}),
+    }, nil
+}
+
+// SendMessage sends a message with retry using config.HTTPRequestConfig
+func (k *KafkaProducer) SendMessage(ctx context.Context, msg ProducerMessage) error {
+	k.mu.RLock()
+    defer k.mu.RUnlock()
+    k.running = true
+
+    maxAttempts := uint(config.HTTPRequestConfig.MaxRetryAttempts)
+    baseDelay := time.Duration(config.HTTPRequestConfig.BaseDelay) * time.Millisecond
+
+    retryOpts := []retry.Option{
+        retry.Attempts(maxAttempts),
+        retry.Delay(baseDelay),
+        retry.DelayType(retry.BackOffDelay),
+        retry.OnRetry(func(n uint, err error) {
+            if k.config.ErrorHandler != nil {
+                k.config.ErrorHandler(ctx, err, &msg)
+            }
+        }),
+        retry.RetryIf(func(err error) bool {
+            return err != nil
+        }),
+    }
+    return retry.Do(
+        func() error {
+            kafkaMsg := kafka.Message{
+                Key:       msg.Key,
+                Value:     msg.Value,
+                Time:      msg.Timestamp,
+                Headers:   msg.Headers,
+            }
+            err := k.writer.WriteMessages(ctx, kafkaMsg)
+			log.Print(err)
+            if err == nil && k.config.SuccessHandler != nil {
+                k.config.SuccessHandler(ctx, msg)
+            }
+            if err != nil {
+				log.Print(err)
+                k.health.LastError = err.Error()
+            }
+            return err
+        },
+        retryOpts...,
+    )
+}
+
+func (k *KafkaProducer) Close() error {
+    k.mu.Lock()
+    defer k.mu.Unlock()
+    if k.running {
+        close(k.stopChan)
+        k.running = false
+        k.health.ConnectionState = false
+    }
+    return k.writer.Close()
+}
+
+func (k *KafkaProducer) Health() Health {
+    k.mu.RLock()
+    defer k.mu.RUnlock()
+    return k.health
+}
+
+/* =========================================================
+   ============== Application-Specific Logic ==============
+   ========================================================= */
+
+type Service interface {
+    SendMessage(ctx context.Context, msg ProducerMessage) error
+    Close() error
+    Health() Health
+    SetSuccessHandler(handler func(ctx context.Context, message ProducerMessage))
+    SetErrorHandler(handler func(ctx context.Context, err error, message *ProducerMessage))
+}
+
+type producerService struct {
+    producer     *KafkaProducer
+    success      func(ctx context.Context, message ProducerMessage)
+    errorHandler func(ctx context.Context, err error, message *ProducerMessage)
+    cfg          Config
+}
+
+var GlobalProducer Service
+
+type client struct {
+    log           *log.Logger
+    mu            sync.RWMutex
+    KafkaProducer *KafkaProducer
+}
+
+var Producer *client
+
+func LoadProducer(ctx context.Context, log *log.Logger) error {
+    producerConfig := NewConfig()
+    producerConfig.Brokers = config.KafkaConfig.Brokers
+    producerConfig.Topic = config.KafkaConfig.OrderTopic // or any topic you want to produce to
+	log.Print(producerConfig.Brokers)
+    c := &client{
+        log: log,
+    }
+
+    producerConfig.ErrorHandler = c.errorHandler
+    producerConfig.SuccessHandler = c.successHandler
+
+    service, err := New(producerConfig)
+    if err != nil {
+        log.Fatalf("FailureCreatingKafkaProducer: %v", err)
+        return err
+    }
+
+    c.KafkaProducer = service
+    Producer = c
+    log.Printf("Constructed new kafka producer successfully")
+
+    return nil
+}
+
+func (c *client) errorHandler(ctx context.Context, err error, message *ProducerMessage) {
+    if message == nil {
+        c.log.Printf("Producer-Error: %v", err)
+    } else {
+        c.log.Printf("Producer-Error: %v, message to %s", err, message.Topic)
+    }
+}
+
+func (c *client) successHandler(ctx context.Context, message ProducerMessage) {
+    c.log.Printf("Message produced successfully to %s", message.Topic)
+}
+
+func (c *client) ProduceWithRetry(ctx context.Context, msg ProducerMessage) error {
+    return c.KafkaProducer.SendMessage(ctx, msg)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+    if GlobalProducer == nil {
+        http.Error(w, "producer not initialized", http.StatusServiceUnavailable)
+        return
+    }
+    h := GlobalProducer.Health()
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(h)
+}

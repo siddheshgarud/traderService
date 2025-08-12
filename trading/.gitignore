@@ -1,0 +1,19 @@
+# Go build
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Vendor
+vendor/
+
+# Env files
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+.DS_Store

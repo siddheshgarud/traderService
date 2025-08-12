@@ -1,0 +1,33 @@
+# --- Build Stage ---
+FROM golang:1.23.2-alpine AS builder
+
+WORKDIR /app
+
+# Install git for Go modules if needed
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Build with debug info
+RUN go build -gcflags="all=-N -l" -o exchange-events-processor ./cmd
+
+# --- Run Stage ---
+FROM alpine:3.18
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/exchange-events-processor .
+
+# Copy config if needed (optional)
+# COPY --from=builder /app/config ./config
+
+# Set environment variables (can be overridden by docker-compose)
+
+
+EXPOSE 8080
+
+CMD ["./exchange-events-processor"]
