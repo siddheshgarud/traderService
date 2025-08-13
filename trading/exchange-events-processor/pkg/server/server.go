@@ -11,30 +11,36 @@ import (
 	kafka_consumer "exchange-events-processor/pkg/kafka/consumer"
 )
 
-type ()
-
+// Start initializes dependencies, sets up HTTP and Kafka handlers, and starts the server.
 func Start(ctx context.Context, logger *log.Logger, shutdownChannel chan struct{}) {
 	logger.Println("Server is starting...")
 
+	// Load dependencies
 	err := loadDependencies(ctx, logger)
 	defer closeDependencies(ctx, logger)
 	if err != nil {
-		log.Fatalf("Loading dependencies failed", err.Error())
+		logger.Fatalf("Loading dependencies failed: %v", err)
 		return
 	}
-	fmt.Println("order topic - ", config.KafkaConfig.OrderTopic)
-kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.OrderTopic, func(msg kafka_consumer.Message) error {
-        return OrderHandler(ctx, msg)
-    })
-    kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.TradesTopic, func(msg kafka_consumer.Message) error {
-        return TradeHandler(ctx, msg)
-    })
-    kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.CashBalanceTopic, func(msg kafka_consumer.Message) error {
-        return CashBalanceHandler(ctx, msg)
-    })
-	
+
+	logger.Printf("Kafka topics: Order=%s, Trades=%s, CashBalance=%s",
+		config.KafkaConfig.OrderTopic, config.KafkaConfig.TradesTopic, config.KafkaConfig.CashBalanceTopic)
+
+	// Register Kafka message handlers
+	kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.TradesTopic, func(msg kafka_consumer.Message) error {
+		return TradeHandler(ctx, msg)
+	})
+	kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.CashBalanceTopic, func(msg kafka_consumer.Message) error {
+		return CashBalanceHandler(ctx, msg)
+	})
+	kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.OrderTopic, func(msg kafka_consumer.Message) error {
+		return OrderHandler(ctx, msg)
+	})
+
+	// Start Kafka consumer in a separate goroutine
 	go kafka_consumer.GlobalConsumer.Pull(ctx)
 
+	// Setup HTTP server and handlers
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", HealthHandler)
 	mux.HandleFunc("/health/kafka", KafkaHealthHandler)
@@ -44,19 +50,19 @@ kafka_consumer.GlobalConsumer.SetMessageHandler(config.KafkaConfig.OrderTopic, f
 		Handler: mux,
 	}
 
+	// Start HTTP server in a separate goroutine
 	go func() {
-		if err = srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal("Server Crashed")
-			return
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("Server crashed: %v", err)
 		}
 	}()
 
+	// Wait for shutdown signal
 	<-shutdownChannel
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("failed to shutdown server gracefully")
+		logger.Fatalf("Failed to shutdown server gracefully: %v", err)
 		return
-
 	}
 
-	log.Printf("existing after gracefully closing dependencies")
+	logger.Println("Exiting after gracefully closing dependencies")
 }

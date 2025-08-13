@@ -1,4 +1,4 @@
-
+version: '3.8'
 
 services:
   zookeeper:
@@ -8,6 +8,8 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    networks:
+      - trading
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -24,3 +26,10 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - trading
+
+networks:
+  trading:
+    external: true
+    name: trading

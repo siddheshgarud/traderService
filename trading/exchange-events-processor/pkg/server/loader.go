@@ -12,20 +12,20 @@ var (
 	loadKafka = kafka.LoadKafka
 )
 
-func loadDependencies(ctx context.Context, log *log.Logger) error {
-
-	// Load Kafka
-	if err := loadKafka(ctx, log); err != nil {
+// loadDependencies initializes all required dependencies.
+func loadDependencies(ctx context.Context, logger *log.Logger) error {
+	if err := loadKafka(ctx, logger); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func closeDependencies(ctx context.Context, log *log.Logger) {
+// closeDependencies closes all initialized dependencies gracefully.
+func closeDependencies(ctx context.Context, logger *log.Logger) {
 	if consumer.Consumer != nil {
 		if err := consumer.Consumer.KafkaConsumer.Close(); err != nil {
-			log.Fatalf("Failure Closing Kafka Consumer Gracefully")
+			logger.Fatalf("Failure closing Kafka consumer gracefully: %v", err)
 		}
 	}
 }
+

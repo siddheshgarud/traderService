@@ -8,7 +8,7 @@ import (
 
 
 func LoadKafka(ctx context.Context, log *log.Logger) error {
-	if err := producer.LoadProducer(ctx, log); err != nil {
+	if err := producer.LoadProducers(ctx, log); err != nil {
 		return err
 	}
 

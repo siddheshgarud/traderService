@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"exchange-events-producer/pkg/config"
 	"exchange-events-producer/pkg/kafka/producer"
-	"fmt"
+	"log"
 	"net/http"
 	"time"
 )
@@ -24,6 +24,8 @@ type ProduceRandomResponse struct {
 }
 
 func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
 	var req ProduceRandomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -31,7 +33,8 @@ func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	
+	var failed bool
+
 	// Produce random orders
 	for i := 0; i < req.OrderCount; i++ {
 		order := map[string]interface{}{
@@ -47,8 +50,10 @@ func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
 			Value:     val,
 			Timestamp: time.Now(),
 		}
-		err := producer.Producer.ProduceWithRetry(ctx, msg)
-		fmt.Println(err)
+		if err := producer.ProduceWithRetry(ctx, msg); err != nil {
+			log.Printf("Failed to produce order message: %v", err)
+			failed = true
+		}
 	}
 
 	// Produce random cash balances
@@ -66,8 +71,10 @@ func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
 			Value:     val,
 			Timestamp: time.Now(),
 		}
-		err := producer.Producer.ProduceWithRetry(ctx, msg)
-		fmt.Println(err)
+		if err := producer.ProduceWithRetry(ctx, msg); err != nil {
+			log.Printf("Failed to produce cash balance message: %v", err)
+			failed = true
+		}
 	}
 
 	// Produce random trades
@@ -87,8 +94,10 @@ func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
 			Value:     val,
 			Timestamp: time.Now(),
 		}
-		err := producer.Producer.ProduceWithRetry(ctx, msg)
-		fmt.Println(err)
+		if err := producer.ProduceWithRetry(ctx, msg); err != nil {
+			log.Printf("Failed to produce trade message: %v", err)
+			failed = true
+		}
 	}
 
 	resp := ProduceRandomResponse{
@@ -97,7 +106,11 @@ func ProduceRandomHandler(w http.ResponseWriter, r *http.Request) {
 		TradesCount:      req.TradesCount,
 		Status:           "success",
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
+	if failed {
+		resp.Status = "partial_failure"
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}

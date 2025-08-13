@@ -5,17 +5,17 @@ import (
 	"log"
 
 	"exchange-events-producer/pkg/kafka"
-
 )
 
+// loadKafka is an alias for kafka.LoadKafka for easier testing/mocking.
 var (
 	loadKafka = kafka.LoadKafka
 )
 
-func loadDependencies(ctx context.Context, log *log.Logger) error {
-
+// loadDependencies loads all required dependencies for the server.
+func loadDependencies(ctx context.Context, logger *log.Logger) error {
 	// Load Kafka
-	if err := loadKafka(ctx, log); err != nil {
+	if err := loadKafka(ctx, logger); err != nil {
 		return err
 	}
 
